@@ -5,10 +5,11 @@
  * 描述：对 pi-web 可视化项的扩展（缓存命中率、MCP 状态可视化、用户人设注入）
  *
  * 功能：
- *  1. 缓存命中率 CHR = 缓存读取 / (输入 + 缓存读取)（单位 token）
- *     - 累积每轮 assistant 消息的 usage，实时计算
- *     - 通过 setStatus 推送到 pi-web 底部的扩展状态栏
- *     - /cache-stats 命令查看输入/输出/缓存读取/缓存写入/命中率明细
+ *  1. 缓存命中率 CHR = 缓存读取 / (输入 + 缓存读取)
+ *     - 从持久化的会话记录（ctx.sessionManager）读取 assistant 消息 usage 计算累计，
+ *       与 pi-web 右上角 token 栏同源，webUI 重启后不归零
+ *     - 通过 setStatus 推送到 pi-web 底部的扩展状态栏（只显示缓存命中率）
+ *     - /cache-stats 命令查看当前缓存命中率
  *
  *  2. MCP 可视化（配合 pi-mcp-adapter 使用）
  *     - 读取标准 MCP 配置文件（.mcp.json、~/.pi/agent/mcp.json、.pi/mcp.json 等）
@@ -72,36 +73,44 @@ const PERSONA_TEMPLATE = `# 我的用户画像（Persona）
 `;
 
 // ============================================================================
-// 运行状态（全局累积）
+// 运行状态
 // ============================================================================
-interface UsageTotals {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-}
-
-const totals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 let lastUi: ExtensionContext["ui"] | undefined;
+let lastSessionManager: ExtensionContext["sessionManager"] | undefined;
 let lastCwd = "";
 let mcpSnapshot: unknown = undefined; // pi-mcp-adapter 的实时快照（可选）
 
 // ============================================================================
-// 工具函数
+// 工具函数：缓存命中率（与 pi-web 右上角同源：读取持久化会话记录里的 usage）
 // ============================================================================
-function cacheHitRate(): string {
-  const denom = totals.input + totals.cacheRead;
-  if (denom <= 0) return "-";
-  const rate = (totals.cacheRead / denom) * 100;
-  return `${rate.toFixed(1)}%`;
+interface CacheStat {
+  rate: number | null;
 }
 
-function fmt(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
+function computeCacheHitRate(sessionManager: ExtensionContext["sessionManager"]): CacheStat {
+  let input = 0;
+  let cacheRead = 0;
+  try {
+    for (const entry of sessionManager.getBranch()) {
+      if (entry.type !== "message") continue;
+      const usage = (entry.message as { usage?: { input?: number; cacheRead?: number } }).usage;
+      if (!usage) continue;
+      input += usage.input ?? 0;
+      cacheRead += usage.cacheRead ?? 0;
+    }
+  } catch {
+    /* 会话不可读时按 0 处理 */
+  }
+  const denom = input + cacheRead;
+  return { rate: denom > 0 ? (cacheRead / denom) * 100 : null };
 }
 
-function statusLine(): string {
-  return `缓存命中率 ${cacheHitRate()} · 输入 ${fmt(totals.input)} · 输出 ${fmt(totals.output)} · 缓存读 ${fmt(totals.cacheRead)} · 缓存写 ${fmt(totals.cacheWrite)}`;
+function cacheHitRateText(stat: CacheStat): string {
+  return stat.rate === null ? "-" : `${stat.rate.toFixed(1)}%`;
+}
+
+function statusLine(stat: CacheStat): string {
+  return `缓存命中率 ${cacheHitRateText(stat)}`;
 }
 
 // ---- 人设文件 ----
@@ -191,11 +200,12 @@ function setServerDisabled(cwd: string, name: string, disabled: boolean): void {
 }
 
 // ---- UI 推送 ----
-function pushCacheStatus(ui?: ExtensionContext["ui"]): void {
+function pushCacheStatus(ui?: ExtensionContext["ui"], sessionManager?: ExtensionContext["sessionManager"]): void {
   const u = ui ?? lastUi;
-  if (!u) return;
+  const sm = sessionManager ?? lastSessionManager;
+  if (!u || !sm) return;
   try {
-    u.setStatus(STATUS_KEY_CACHE, statusLine());
+    u.setStatus(STATUS_KEY_CACHE, statusLine(computeCacheHitRate(sm)));
   } catch {
     /* ignore */
   }
@@ -238,33 +248,18 @@ export default async function (pi: ExtensionAPI) {
     return { systemPrompt: `${event.systemPrompt}${sep}${persona}` };
   });
 
-  // ---------- 事件：usage 累积（缓存命中率） ----------
-  pi.on("message_end", (event, ctx) => {
-    const u = (event.message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).usage;
-    if (u) {
-      totals.input += u.input ?? 0;
-      totals.output += u.output ?? 0;
-      totals.cacheRead += u.cacheRead ?? 0;
-      totals.cacheWrite += u.cacheWrite ?? 0;
-    }
-    pushCacheStatus(ctx.ui);
-  });
-
-  // 会话开始：刷新 UI 引用 + MCP widget + 缓存命中率初始显示（每会话独立累计）
-  pi.on("session_start", (event, ctx) => {
+  // 会话开始：刷新引用 + 从持久化会话记录计算缓存命中率（重启后不归零）+ MCP widget
+  pi.on("session_start", (_event, ctx) => {
     lastUi = ctx.ui;
+    lastSessionManager = ctx.sessionManager;
     lastCwd = ctx.cwd;
-    totals.input = 0;
-    totals.output = 0;
-    totals.cacheRead = 0;
-    totals.cacheWrite = 0;
-    pushCacheStatus(ctx.ui);
+    pushCacheStatus(ctx.ui, ctx.sessionManager);
     pushMcpWidget(ctx.ui, ctx.cwd);
   });
 
-  // agent 结束：再刷一次，确保底栏数据是最终值
+  // agent 结束：从会话记录重算，确保底栏数据是最新值
   pi.on("agent_end", (_event, ctx) => {
-    pushCacheStatus(ctx.ui);
+    pushCacheStatus(ctx.ui, ctx.sessionManager);
   });
 
   // 会话结束时清理状态栏
@@ -294,16 +289,10 @@ export default async function (pi: ExtensionAPI) {
 
   // ---------- 命令：/cache-stats ----------
   pi.registerCommand("cache-stats", {
-    description: "查看本次会话 token 用量与缓存命中率（CHR）",
+    description: "查看本次会话缓存命中率",
     handler: async (_args, ctx) => {
-      const t = totals;
-      const denom = t.input + t.cacheRead;
-      const chr = denom > 0 ? ((t.cacheRead / denom) * 100).toFixed(1) : "-";
-      ctx.ui.notify(
-        `输入 ${t.input} · 输出 ${t.output} · 缓存读 ${t.cacheRead} · 缓存写 ${t.cacheWrite}\n` +
-        `缓存命中率 CHR = ${chr}%（缓存读 ${t.cacheRead} / 输入+缓存读 ${denom}）`,
-        "info",
-      );
+      const stat = computeCacheHitRate(ctx.sessionManager);
+      ctx.ui.notify(`缓存命中率 ${cacheHitRateText(stat)}`, "info");
     },
   });
 
