@@ -274,6 +274,7 @@ export default function (pi: ExtensionAPI) {
     label: "Describe Image",
     description:
       "用外部视觉模型分析图片。当用户消息里出现 [image attached, ref=\"img#...\"] 提示、或你 read 到图片但看不到内容时，调用本工具传入该 ref 和具体需求来提取信息（如识别报错、描述布局、提取文字）。",
+    promptSnippet: "Analyze images with an external vision model; pass a ref (img#xxx) and request to extract errors / describe layout / read text",
     parameters: Type.Object({
       ref: Type.String({ description: "图片引用，形如 img#xxxx。来自消息里的 [image attached, ref=...] 提示" }),
       prompt: Type.String({ description: "对这张图的具体要求，例如：提取图中报错信息 / 描述页面布局 / 识别图中文字" }),

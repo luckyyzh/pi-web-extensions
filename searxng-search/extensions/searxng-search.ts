@@ -151,6 +151,7 @@ export default function (pi: ExtensionAPI) {
     label: "Web Search",
     description:
       "通过私有 SearXNG 实例搜索互联网，返回标题/链接/摘要/引擎。用于获取最新信息、查文档、找资料。",
+    promptSnippet: "Search the internet via a private SearXNG instance; returns title/link/snippet/engine",
     parameters: Type.Object({
       query: Type.String({ description: "搜索关键词" }),
       engines: Type.Optional(Type.String({
