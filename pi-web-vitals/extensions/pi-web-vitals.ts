@@ -199,6 +199,38 @@ function setServerDisabled(cwd: string, name: string, disabled: boolean): void {
   writeFileSync(p, JSON.stringify(data, null, 2) + "\n", "utf8");
 }
 
+/** 新增/覆盖一个 MCP server 定义（默认写入项目 .pi/mcp.json；global=true 写入 ~/.pi/agent/mcp.json） */
+function upsertServer(cwd: string, name: string, def: Record<string, unknown>, globalScope = false): void {
+  const p = globalScope ? join(AGENT_DIR, "mcp.json") : join(cwd, ".pi", "mcp.json");
+  let data: { mcpServers?: Record<string, Record<string, unknown>> } = {};
+  if (existsSync(p)) {
+    try {
+      data = JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      data = {};
+    }
+  }
+  data.mcpServers ??= {};
+  data.mcpServers[name] = { ...(data.mcpServers[name] ?? {}), ...def };
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(data, null, 2) + "\n", "utf8");
+}
+
+/** 从项目 .pi/mcp.json 删除一个 server；返回是否删除成功 */
+function removeServer(cwd: string, name: string): boolean {
+  const p = join(cwd, ".pi", "mcp.json");
+  if (!existsSync(p)) return false;
+  try {
+    const data: { mcpServers?: Record<string, unknown> } = JSON.parse(readFileSync(p, "utf8"));
+    if (!data.mcpServers || !(name in data.mcpServers)) return false;
+    delete data.mcpServers[name];
+    writeFileSync(p, JSON.stringify(data, null, 2) + "\n", "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ---- UI 推送 ----
 function pushCacheStatus(ui?: ExtensionContext["ui"], sessionManager?: ExtensionContext["sessionManager"]): void {
   const u = ui ?? lastUi;
@@ -217,14 +249,14 @@ function pushMcpWidget(ui?: ExtensionContext["ui"], cwd = lastCwd): void {
   const servers = loadMcpServers(cwd);
   const lines: string[] = [`[${EXT_NAME}] MCP 服务器（共 ${servers.length} 个）`];
   if (servers.length === 0) {
-    lines.push("  未配置 MCP 服务器。可创建 .mcp.json 或 ~/.pi/agent/mcp.json");
+    lines.push("  未配置 MCP 服务器。输入 /mcp-ui 可引导添加");
   } else {
     for (const s of servers) {
       const flag = s.disabled ? "已禁用" : "已启用";
       lines.push(`  ${flag}  ${s.name}  [${s.kind}] ${s.target}`);
       lines.push(`      来源：${s.source.replace(/\\/g, "/")}`);
     }
-    lines.push("  输入 /mcp-ui 查看详情、启用或禁用");
+    lines.push("  输入 /mcp-ui 查看/添加/启用/禁用");
   }
   try {
     u.setWidget(WIDGET_KEY, lines, { placement: "aboveEditor" });
@@ -296,37 +328,95 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
-  // ---------- 命令：/mcp-ui ----------
+  // ---------- 命令：/mcp-ui（查看 / 添加 / 删除 / 启用 / 禁用） ----------
   pi.registerCommand("mcp-ui", {
-    description: "查看/配置 MCP server（列表、启用、禁用）",
+    description: "查看/配置 MCP server（无配置时引导添加，或 add/remove/enable/disable）",
     handler: async (args, ctx) => {
-      const [verb, name] = args.trim().split(/\s+/, 2);
+      const parts = args.trim().split(/\s+/);
+      const verb = parts[0];
       const cwd = ctx.cwd;
 
-      if (!verb) {
+      const list = () => {
         const servers = loadMcpServers(cwd);
         if (servers.length === 0) {
-          ctx.ui.notify("未配置 MCP server。可创建 .mcp.json 或 ~/.pi/agent/mcp.json", "info");
+          ctx.ui.notify("未配置 MCP 服务器。直接输入 /mcp-ui 可引导添加，或 /mcp-ui add <名称> <命令或URL>", "info");
           return;
         }
         const lines = servers
-          .map((s) => `${s.disabled ? "[off]" : "[on ]"} ${s.name} (${s.kind}: ${s.target})`)
+          .map((s) => `${s.disabled ? "[已禁用]" : "[已启用]"} ${s.name} (${s.kind}: ${s.target})`)
           .join("\n");
-        ctx.ui.notify(`MCP servers:\n${lines}\n\n/mcp-ui enable <name> 或 /mcp-ui disable <name>`, "info");
+        ctx.ui.notify(`MCP 服务器（${servers.length} 个）：\n${lines}\n\n/mcp-ui enable <名称> 或 /mcp-ui disable <名称>`, "info");
+      };
+
+      // 无参数：有服务器则列列表；没有则引导添加（交互式配置面板）
+      if (!verb) {
+        if (loadMcpServers(cwd).length > 0) {
+          list();
+          return;
+        }
+        const name = await ctx.ui.input("MCP 服务器名称", "如 chrome-devtools");
+        if (!name) return;
+        const spec = await ctx.ui.input("命令 或 URL", "如 npx -y chrome-devtools-mcp 或 https://mcp.example.com/mcp");
+        if (!spec) return;
+        const def = /^https?:\/\//.test(spec)
+          ? { url: spec }
+          : { command: spec.split(/\s+/)[0], args: spec.split(/\s+/).slice(1) };
+        upsertServer(cwd, name, def);
+        pushMcpWidget(ctx.ui, cwd);
+        ctx.ui.notify(`已添加 MCP 服务器 "${name}"（写入 .pi/mcp.json）。执行 /reload 生效。`, "info");
         return;
       }
 
-      if ((verb === "enable" || verb === "disable") && name) {
-        setServerDisabled(cwd, name, verb === "disable");
+      if (verb === "add") {
+        let globalScope = false;
+        let i = 1;
+        if (parts[1] === "-g") {
+          globalScope = true;
+          i = 2;
+        }
+        const name = parts[i];
+        const rest = parts.slice(i + 1).join(" ");
+        if (!name || !rest) {
+          ctx.ui.notify("用法：/mcp-ui add <名称> <命令或URL> [参数...]，如 /mcp-ui add chrome-devtools npx -y chrome-devtools-mcp（加 -g 写入全局）", "info");
+          return;
+        }
+        const def = /^https?:\/\//.test(rest)
+          ? { url: rest }
+          : { command: rest.split(/\s+/)[0], args: rest.split(/\s+/).slice(1) };
+        upsertServer(cwd, name, def, globalScope);
         pushMcpWidget(ctx.ui, cwd);
-        ctx.ui.notify(`MCP server "${name}" 已${verb === "enable" ? "启用" : "禁用"}（写入 .pi/mcp.json）`, "info");
+        ctx.ui.notify(
+          `已添加 MCP 服务器 "${name}"（写入 ${globalScope ? "~/.pi/agent/mcp.json" : ".pi/mcp.json"}）。执行 /reload 生效。`,
+          "info",
+        );
+        return;
+      }
+
+      if (verb === "remove" && parts[1]) {
+        const ok = removeServer(cwd, parts[1]);
+        pushMcpWidget(ctx.ui, cwd);
+        ctx.ui.notify(ok ? `已删除 MCP 服务器 "${parts[1]}"。` : `未找到 "${parts[1]}"。`, ok ? "info" : "warning");
+        return;
+      }
+
+      if ((verb === "enable" || verb === "disable") && parts[1]) {
+        setServerDisabled(cwd, parts[1], verb === "disable");
+        pushMcpWidget(ctx.ui, cwd);
+        ctx.ui.notify(`MCP 服务器 "${parts[1]}" 已${verb === "enable" ? "启用" : "禁用"}（写入 .pi/mcp.json）。执行 /reload 生效。`, "info");
+        return;
+      }
+
+      if (verb === "list") {
+        list();
         return;
       }
 
       ctx.ui.notify(
-        "用法：/mcp-ui          列出 server\n" +
-        "      /mcp-ui enable <name>   启用\n" +
-        "      /mcp-ui disable <name>  禁用",
+        "用法：\n  /mcp-ui                      查看列表；无服务器时进入引导添加\n" +
+          "  /mcp-ui add <名称> <命令或URL> [参数...]   添加（加 -g 写入全局）\n" +
+          "  /mcp-ui remove <名称>         删除\n" +
+          "  /mcp-ui enable|disable <名称>  启用/禁用\n" +
+          "  /mcp-ui list                  查看列表",
         "info",
       );
     },
