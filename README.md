@@ -1,6 +1,6 @@
 # Pi Web Extensions
 
-三个独立的 pi 扩展包，用于 pi + pi-web 环境。每个都是独立的 pi 包（`pi` 清单 + `extensions/`），可单独安装/启停/卸载。
+四个独立的 pi 扩展包，用于 pi + pi-web 环境。每个都是独立的 pi 包（`pi` 清单 + `extensions/`），可单独安装/启停/卸载。
 
 ## 包含
 
@@ -11,6 +11,7 @@
 `/mcp-ui` 管理面板（内嵌同一窗口，不弹窗）：`[1]` 服务器列表/详情/启停/测试连接，`[2]` 引导式添加，`[3]` JSON 编辑(粘贴后回车)，`[4]` pi-mcp-adapter 选项，`[7]` 切换项目/全局作用域，`[0]` 刷新，`Esc` 关闭。
 | **searxng-search** | 通过自建 SearXNG 端点提供 `web_search` 工具（X-Search-Token 鉴权） | `/web-search config url <地址>`、`/web-search config token <token>`；或环境变量 `SEARXNG_URL` / `SEARXNG_TOKEN` |
 | **describe-image** | 按需识图：给非视觉模型(如 DeepSeek)加识图能力，主模型调 `describe_image` 工具 + 外部视觉模型(qwen-vl 等) | `/describe-image config baseUrl <地址>`、`/describe-image config model <模型>`、`/describe-image config apiKey <key>`；或环境变量 `VISION_BASE_URL` / `VISION_MODEL` / `VISION_API_KEY` |
+| **ssh** | SSH 远程执行：把 read/write/edit/bash 转发到远程机器执行；webUI 场景配合 pi-web 影子目录，会话按远程目录隔离 | `/ssh user@host` 或 `/ssh user@host:/path` 启用、`/ssh off` 退出；webUI 模式读写 `~/.pi/agent/ssh-config.json`（需 SSH 密钥免密） |
 
 > 密钥一律通过环境变量或 `~/.pi/agent/` 下各自的配置文件提供，扩展源码不包含任何密钥。
 
@@ -24,9 +25,10 @@ cd pi-web-extensions
 pi install ./pi-web-vitals
 pi install ./searxng-search
 pi install ./describe-image
+pi install ./ssh
 ```
 
-在 pi-web Plugins 面板中可看到三个独立包，可单独启用/禁用/卸载。
+在 pi-web Plugins 面板中可看到四个独立包，可单独启用/禁用/卸载。
 安装后 `/reload` 或新开会话生效。
 
 ## 目录结构
@@ -41,4 +43,7 @@ searxng-search/
 describe-image/
   package.json
   extensions/describe-image.ts
+ssh/
+  package.json
+  extensions/ssh.ts
 ```
