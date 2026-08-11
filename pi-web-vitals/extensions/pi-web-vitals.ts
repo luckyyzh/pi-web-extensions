@@ -28,6 +28,8 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey, type Theme } from "@earendil-works/pi-tui";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -146,6 +148,8 @@ interface McpServerInfo {
   disabled: boolean;
   kind: string;         // command | url | socket
   target: string;
+  command: string;      // stdio 可执行
+  args: string[];       // stdio 参数
 }
 
 function loadMcpServers(cwd: string): McpServerInfo[] {
@@ -176,6 +180,8 @@ function loadMcpServers(cwd: string): McpServerInfo[] {
       disabled: def.disabled === true,
       kind: sock ? "socket" : url ? "url" : "command",
       target: sock || url || cmd || "(未配置可执行)",
+      command: cmd,
+      args: Array.isArray(def.args) ? def.args.filter((a): a is string => typeof a === "string") : [],
     });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
@@ -294,6 +300,482 @@ function pushMcpWidget(ui?: ExtensionContext["ui"], cwd = lastCwd): void {
 }
 
 // ============================================================================
+// MCP 管理面板（内嵌同一窗口，不弹窗）
+// ============================================================================
+
+function scopeMcpPath(cwd: string, scope: "project" | "global"): string {
+  return scope === "global" ? join(AGENT_DIR, "mcp.json") : join(cwd, ".pi", "mcp.json");
+}
+
+function readScopeConfig(
+  cwd: string,
+  scope: "project" | "global",
+): { settings?: Record<string, unknown>; mcpServers?: Record<string, Record<string, unknown>> } {
+  const p = scopeMcpPath(cwd, scope);
+  if (!existsSync(p)) return {};
+  try {
+    return JSON.parse(readFileSync(p, "utf8")) || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeScopeConfig(cwd: string, scope: "project" | "global", data: unknown): void {
+  const p = scopeMcpPath(cwd, scope);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(data, null, 2) + "\n", "utf8");
+}
+
+/** stdio 型 MCP 连接测试：spawn → initialize → tools/list */
+function runStdioMcpTest(command: string, args: string[]): Promise<{ ok: boolean; detail: string }> {
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn> | undefined;
+    let info: { name?: string; version?: string } | undefined;
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child?.kill(); } catch { /* */ }
+      resolve({ ok: false, detail: "连接超时(20s)" });
+    }, 20000);
+    try {
+      child = spawn([command, ...args].join(" "), [], { shell: true, stdio: ["pipe", "pipe", "inherit"], windowsHide: true });
+    } catch (error) {
+      clearTimeout(timer);
+      resolve({ ok: false, detail: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    let buf = "";
+    child.stdout?.on("data", (d) => {
+      buf += d.toString();
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const l of lines) {
+        if (!l.trim()) continue;
+        try {
+          const m = JSON.parse(l);
+          if (m.id === 1) {
+            info = m.result?.serverInfo;
+            child?.stdin?.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+            setTimeout(() => {
+              child?.stdin?.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) + "\n");
+            }, 300);
+          } else if (m.id === 2) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try { child?.kill(); } catch { /* */ }
+            const tools = Array.isArray(m.result?.tools) ? m.result.tools : [];
+            resolve({ ok: true, detail: `连通 · ${info?.name ?? "server"} ${info?.version ?? ""} · ${tools.length} 个工具` });
+          }
+        } catch { /* 非 JSON 行忽略 */ }
+      }
+    });
+    child.stdin?.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "pi-mcp-test", version: "1.0" } },
+      }) + "\n",
+    );
+    child.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, detail: e.message });
+    });
+    child.on("exit", (code) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolve({ ok: false, detail: `进程退出 code=${code}` });
+      }
+    });
+  });
+}
+
+async function testMcpConnection(server: McpServerInfo): Promise<string> {
+  try {
+    if (server.kind === "url") {
+      const res = await fetch(server.target, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "pi-mcp-test", version: "1.0" } },
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const text = await res.text();
+      if (res.ok && text) return `连通 (HTTP ${res.status})`;
+      return `HTTP ${res.status}`;
+    }
+    if (server.kind === "command") {
+      const r = await runStdioMcpTest(server.command, server.args);
+      return r.ok ? `测试成功 · ${r.detail}` : `测试失败 · ${r.detail}`;
+    }
+    return `socket 类型暂不支持自动测试`;
+  } catch (error) {
+    return `测试失败 · ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/** 提取可打印字符 / 粘贴内容（bracketed paste） */
+function pasteOrChar(data: string): string | null {
+  if (data.startsWith("\x1b[200~") && data.endsWith("\x1b[201~")) {
+    return data.slice("\x1b[200~".length, -"\x1b[201~".length);
+  }
+  if (data.length === 1 && data.charCodeAt(0) >= 32) return data;
+  return null;
+}
+
+const OPTS_DEFS: Array<{ key: string; label: string; isNumber: boolean }> = [
+  { key: "toolPrefix", label: "toolPrefix（工具前缀）", isNumber: false },
+  { key: "requestTimeoutMs", label: "requestTimeoutMs（请求超时ms）", isNumber: true },
+  { key: "maxRetries", label: "maxRetries（重连次数）", isNumber: true },
+];
+
+class MCPPanel {
+  private scope: "project" | "global" = "project";
+  private mode: "menu" | "list" | "detail" | "add" | "json" | "opts" | "optsVal" = "menu";
+  private servers: McpServerInfo[] = [];
+  private detail: McpServerInfo | null = null;
+  private status = "";
+  // add
+  private addStep = 0;
+  private addName = "";
+  private addSpec = "";
+  private addArgs = "";
+  private addIsCommand = false;
+  // json
+  private jsonBuf = "";
+  // opts
+  private optsSel = 0;
+  private optsVal = "";
+
+  constructor(
+    private theme: Theme,
+    private done: (v: undefined) => void,
+    private tui: { requestRender(): void },
+    private cwd: string,
+  ) {
+    this.refresh();
+  }
+
+  private refresh(): void {
+    this.servers = loadMcpServers(this.cwd);
+  }
+
+  private scopeLabel(): string {
+    return this.scope === "global" ? "全局(~/.pi/agent/mcp.json)" : "项目(.pi/mcp.json)";
+  }
+
+  handleInput(data: string): void {
+    const esc = matchesKey(data, "escape");
+
+    if (this.mode === "menu") {
+      if (esc) return this.done(undefined);
+      if (matchesKey(data, "1")) { this.mode = "list"; return; }
+      if (matchesKey(data, "2")) { this.mode = "add"; this.addStep = 0; this.addName = ""; this.addSpec = ""; this.addArgs = ""; return; }
+      if (matchesKey(data, "3")) { this.mode = "json"; this.jsonBuf = ""; return; }
+      if (matchesKey(data, "4")) { this.mode = "opts"; return; }
+      if (matchesKey(data, "7")) { this.scope = this.scope === "project" ? "global" : "project"; this.status = `作用域已切换为 ${this.scopeLabel()}`; return; }
+      if (matchesKey(data, "0")) { this.refresh(); this.status = "已刷新"; return; }
+      return;
+    }
+
+    if (this.mode === "list") {
+      if (esc || matchesKey(data, "b")) { this.mode = "menu"; return; }
+      if (data.length === 1 && data >= "1" && data <= "9") {
+        const i = parseInt(data, 10) - 1;
+        if (i < this.servers.length) { this.detail = this.servers[i]; this.mode = "detail"; this.status = ""; }
+      }
+      return;
+    }
+
+    if (this.mode === "detail" && this.detail) {
+      if (esc || matchesKey(data, "b")) { this.mode = "list"; return; }
+      if (matchesKey(data, "e")) { this.setDisabled(false); return; }
+      if (matchesKey(data, "d")) { this.setDisabled(true); return; }
+      if (matchesKey(data, "t")) { void this.runTest(); return; }
+      if (matchesKey(data, "x")) { this.removeDetail(); this.mode = "list"; return; }
+      if (matchesKey(data, "l")) { this.toggleLifecycle(); return; }
+      if (matchesKey(data, "g")) { this.toggleDirectTools(); return; }
+      return;
+    }
+
+    if (this.mode === "add") {
+      if (esc) { this.mode = "menu"; return; }
+      if (matchesKey(data, "return")) {
+        if (this.addStep === 0 && this.addName) { this.addStep = 1; return; }
+        if (this.addStep === 1) { this.addIsCommand = !/^https?:\/\//.test(this.addSpec.trim()); this.addStep = 2; return; }
+        if (this.addStep === 2) { this.commitAdd(); this.mode = "menu"; return; }
+        return;
+      }
+      if (matchesKey(data, "backspace")) {
+        if (this.addStep === 0) this.addName = this.addName.slice(0, -1);
+        else if (this.addStep === 1) this.addSpec = this.addSpec.slice(0, -1);
+        else this.addArgs = this.addArgs.slice(0, -1);
+        return;
+      }
+      const t = pasteOrChar(data);
+      if (t) {
+        if (this.addStep === 0) this.addName += t;
+        else if (this.addStep === 1) this.addSpec += t;
+        else this.addArgs += t;
+      }
+      return;
+    }
+
+    if (this.mode === "json") {
+      if (esc) { this.mode = "menu"; return; }
+      if (matchesKey(data, "return")) { this.commitJson(); this.mode = "menu"; return; }
+      if (matchesKey(data, "backspace")) { this.jsonBuf = this.jsonBuf.slice(0, -1); return; }
+      const t = pasteOrChar(data);
+      if (t) this.jsonBuf += t;
+      return;
+    }
+
+    if (this.mode === "opts") {
+      if (esc || matchesKey(data, "b")) { this.mode = "menu"; return; }
+      if (data === "1" || data === "2" || data === "3") { this.optsSel = parseInt(data, 10) - 1; this.optsVal = ""; this.mode = "optsVal"; }
+      return;
+    }
+
+    if (this.mode === "optsVal") {
+      if (esc) { this.mode = "opts"; return; }
+      if (matchesKey(data, "return")) { this.commitOpt(); this.mode = "opts"; return; }
+      if (matchesKey(data, "backspace")) { this.optsVal = this.optsVal.slice(0, -1); return; }
+      const t = pasteOrChar(data);
+      if (t) this.optsVal += t;
+      return;
+    }
+  }
+
+  private setDisabled(disabled: boolean): void {
+    if (!this.detail) return;
+    setServerDisabled(this.cwd, this.detail.name, disabled);
+    this.refresh();
+    this.detail = this.servers.find((s) => s.name === this.detail?.name) ?? null;
+    this.status = `已${disabled ? "禁用" : "启用"} ${this.detail?.name ?? ""}（写 ${this.scopeLabel()}，执行 /reload 生效）`;
+  }
+
+  private removeDetail(): void {
+    if (!this.detail) return;
+    removeServer(this.cwd, this.detail.name);
+    this.refresh();
+    this.status = `已删除 ${this.detail.name}`;
+    this.detail = null;
+  }
+
+  private toggleLifecycle(): void {
+    if (!this.detail) return;
+    const cur = this.detailLifecycle();
+    const next = cur === "eager" ? "lazy" : "eager";
+    this.patchDetail({ lifecycle: next });
+    this.status = `${this.detail.name} 生命周期 → ${next}`;
+  }
+
+  private toggleDirectTools(): void {
+    if (!this.detail) return;
+    const cur = this.detailDirectTools();
+    const next = cur === true ? false : true;
+    this.patchDetail({ directTools: next });
+    this.status = `${this.detail.name} directTools → ${next ? "直连" : "代理"}`;
+  }
+
+  private detailLifecycle(): string {
+    const def = this.findDef(this.detail?.name);
+    return typeof def?.lifecycle === "string" ? def.lifecycle : "lazy";
+  }
+
+  private detailDirectTools(): boolean {
+    const def = this.findDef(this.detail?.name);
+    return def?.directTools === true;
+  }
+
+  private findDef(name?: string): Record<string, unknown> | undefined {
+    if (!name) return undefined;
+    return readScopeConfig(this.cwd, this.scope).mcpServers?.[name];
+  }
+
+  private patchDetail(patch: Record<string, unknown>): void {
+    if (!this.detail) return;
+    const data = readScopeConfig(this.cwd, this.scope);
+    data.mcpServers ??= {};
+    data.mcpServers[this.detail.name] = { ...(data.mcpServers[this.detail.name] ?? {}), ...patch };
+    writeScopeConfig(this.cwd, this.scope, data);
+    this.refresh();
+    this.detail = this.servers.find((s) => s.name === this.detail?.name) ?? null;
+  }
+
+  private commitAdd(): void {
+    const name = this.addName.trim();
+    const spec = this.addSpec.trim();
+    if (!name || !spec) { this.status = "名称或命令/URL 不能为空"; return; }
+    const def: Record<string, unknown> = this.addIsCommand
+      ? { command: spec.split(/\s+/)[0], args: spec.split(/\s+/).slice(1) }
+      : { url: spec };
+    const p = scopeMcpPath(this.cwd, this.scope);
+    const data = readScopeConfig(this.cwd, this.scope);
+    data.mcpServers ??= {};
+    data.mcpServers[name] = def;
+    writeScopeConfig(this.cwd, this.scope, data);
+    this.refresh();
+    this.status = `已添加 ${name}（${p}），执行 /reload 生效`;
+  }
+
+  private commitJson(): void {
+    try {
+      const parsed = JSON.parse(this.jsonBuf) as { mcpServers?: unknown };
+      const servers = parsed?.mcpServers;
+      if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
+        this.status = '格式无效：需要 {"mcpServers": { ... }}';
+        return;
+      }
+      const data = readScopeConfig(this.cwd, this.scope);
+      data.mcpServers = servers as Record<string, Record<string, unknown>>;
+      writeScopeConfig(this.cwd, this.scope, data);
+      this.refresh();
+      this.status = `已保存到 ${scopeMcpPath(this.cwd, this.scope)}，执行 /reload 生效`;
+    } catch (error) {
+      this.status = `JSON 解析失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private commitOpt(): void {
+    const def = OPTS_DEFS[this.optsSel];
+    if (!def) return;
+    const data = readScopeConfig(this.cwd, this.scope);
+    data.settings ??= {};
+    if (def.isNumber) {
+      const n = Number(this.optsVal);
+      if (Number.isFinite(n)) data.settings[def.key] = n;
+    } else {
+      data.settings[def.key] = this.optsVal;
+    }
+    writeScopeConfig(this.cwd, this.scope, data);
+    this.refresh();
+    this.status = `已设置 ${def.key}=${this.optsVal}`;
+  }
+
+  private async runTest(): Promise<void> {
+    const s = this.detail;
+    if (!s) return;
+    this.status = `正在测试 ${s.name} ...`;
+    this.tui.requestRender();
+    const result = await testMcpConnection(s);
+    this.status = `${s.name} · ${result}`;
+    this.tui.requestRender();
+  }
+
+  render(width: number): string[] {
+    const w = Math.max(width, 40);
+    const box = (s: string): string => (s.length > w - 2 ? s.slice(0, w - 5) + "…" : s);
+    const sep = "─".repeat(Math.min(w - 2, 60));
+    const lines: string[] = [];
+
+    if (this.mode === "menu") {
+      lines.push("MCP 管理面板");
+      lines.push(sep);
+      lines.push(`作用域: ${this.scopeLabel()}   [7 切换]`);
+      lines.push("  [1] 服务器列表 / 详情 / 启停 / 测试连接");
+      lines.push("  [2] 添加服务器（引导式）");
+      lines.push("  [3] 编辑 JSON（粘贴整份后回车）");
+      lines.push("  [4] pi-mcp-adapter 选项");
+      lines.push("  [0] 刷新");
+      lines.push(sep);
+      lines.push(`[Esc] 关闭    ${this.status ? `状态: ${box(this.status)}` : ""}`);
+      return lines;
+    }
+
+    if (this.mode === "list") {
+      lines.push(`MCP 服务器列表（${this.servers.length} 个）`);
+      lines.push(sep);
+      if (this.servers.length === 0) {
+        lines.push("  暂无服务器。返回按 [2] 添加。");
+      } else {
+        this.servers.forEach((s, i) => {
+          lines.push(`  ${i + 1}. ${s.disabled ? "[禁用]" : "[启用]"} ${s.name}  (${s.kind}) ${box(s.target)}`);
+        });
+      }
+      lines.push(sep);
+      lines.push(`[1-9] 查看/操作  [b/Esc] 返回`);
+      return lines;
+    }
+
+    if (this.mode === "detail" && this.detail) {
+      const d = this.detail;
+      lines.push(`服务器: ${d.name}`);
+      lines.push(sep);
+      lines.push(`  状态: ${d.disabled ? "已禁用" : "已启用"}`);
+      lines.push(`  类型: ${d.kind}`);
+      lines.push(`  命令/URL: ${box(d.target)}`);
+      lines.push(`  生命周期: ${this.detailLifecycle()}   directTools: ${this.detailDirectTools() ? "直连" : "代理"}`);
+      lines.push(`  来源: ${box(d.source.replace(/\\/g, "/"))}`);
+      lines.push(sep);
+      lines.push("  [e] 启用  [d] 禁用  [t] 测试连接  [l] 切换生命周期  [g] 直连/代理  [x] 删除");
+      lines.push(`  [b/Esc] 返回    ${this.status ? box(this.status) : ""}`);
+      return lines;
+    }
+
+    if (this.mode === "add") {
+      lines.push(`添加服务器（引导式）  作用域: ${this.scopeLabel()}`);
+      lines.push(sep);
+      if (this.addStep === 0) lines.push(`  第 1/3 步 · 名称: ${this.addName}█`);
+      else if (this.addStep === 1) lines.push(`  名称: ${this.addName}\n  第 2/3 步 · 命令或 URL: ${this.addSpec}█`);
+      else lines.push(`  名称: ${this.addName}  命令/URL: ${this.addSpec}\n  第 3/3 步 · 参数(空格分隔, 可空): ${this.addArgs}█`);
+      lines.push(sep);
+      lines.push(`[Enter] 下一步/完成  [Backspace] 删除  [Esc] 取消`);
+      return lines;
+    }
+
+    if (this.mode === "json") {
+      lines.push("编辑 MCP 配置（JSON）  [Esc] 返回");
+      lines.push(sep);
+      lines.push("当前生效配置:");
+      const effective = JSON.stringify(effectiveMcpConfig(this.cwd), null, 2);
+      for (const l of effective.split("\n")) lines.push("  " + box(l));
+      lines.push(sep);
+      lines.push("粘贴新的完整 JSON（含 mcpServers）后回车应用:");
+      lines.push("  " + box(this.jsonBuf) + "█");
+      lines.push(sep);
+      lines.push(this.status ? box(this.status) : "");
+      return lines;
+    }
+
+    if (this.mode === "opts") {
+      lines.push("pi-mcp-adapter 选项（写入作用域配置的 settings）");
+      lines.push(sep);
+      const data = readScopeConfig(this.cwd, this.scope);
+      OPTS_DEFS.forEach((d, i) => {
+        const v = data.settings?.[d.key] ?? "(未设置)";
+        lines.push(`  ${i + 1}. ${d.label}: ${box(String(v))}`);
+      });
+      lines.push(sep);
+      lines.push(`[1-3] 编辑  [b/Esc] 返回    ${this.status ? box(this.status) : ""}`);
+      return lines;
+    }
+
+    if (this.mode === "optsVal") {
+      const d = OPTS_DEFS[this.optsSel];
+      lines.push(`编辑 ${d?.label ?? ""}（${this.scopeLabel()}）`);
+      lines.push(sep);
+      const cur = readScopeConfig(this.cwd, this.scope).settings?.[d?.key ?? ""] ?? "(未设置)";
+      lines.push(`  当前: ${box(String(cur))}`);
+      lines.push(`  输入新值回车（空=不修改）: ${this.optsVal}█`);
+      lines.push(`[Enter] 保存  [Esc] 取消`);
+      return lines;
+    }
+
+    return lines;
+  }
+}
+
+// ============================================================================
 // 扩展主体
 // ============================================================================
 export default async function (pi: ExtensionAPI) {
@@ -375,27 +857,13 @@ export default async function (pi: ExtensionAPI) {
         ctx.ui.notify(`MCP 服务器（${servers.length} 个）：\n${lines}\n\n/mcp-ui enable <名称> 或 /mcp-ui disable <名称>`, "info");
       };
 
-      // 无参数：打开一个编辑框，显示已有 MCP 并可增删改，保存写入 .pi/mcp.json
+      // 无参数：打开内嵌的 MCP 管理面板（同一窗口，不弹窗）
       if (!verb) {
-        const prefill = JSON.stringify(effectiveMcpConfig(cwd), null, 2);
-        const edited = await ctx.ui.editor(
-          "MCP 配置（保存后写入 .pi/mcp.json）：在此查看/添加/修改/删除服务器",
-          prefill,
+        await ctx.ui.custom<void>(
+          (tui, theme, _kb, done) => new MCPPanel(theme, done, tui, cwd),
+          { overlay: true },
         );
-        if (edited === undefined) return; // 用户取消
-        try {
-          const parsed = JSON.parse(edited) as { mcpServers?: unknown };
-          const servers = parsed?.mcpServers;
-          if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
-            ctx.ui.notify('配置格式无效：需要 {"mcpServers": { ... }} 结构', "warning");
-            return;
-          }
-          writeProjectMcpConfig(cwd, { mcpServers: servers });
-          pushMcpWidget(ctx.ui, cwd);
-          ctx.ui.notify("MCP 配置已保存（写入 .pi/mcp.json）。执行 /reload 生效。", "info");
-        } catch (error) {
-          ctx.ui.notify(`JSON 解析失败：${error instanceof Error ? error.message : String(error)}`, "warning");
-        }
+        pushMcpWidget(ctx.ui, cwd);
         return;
       }
 
