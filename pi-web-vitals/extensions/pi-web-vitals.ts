@@ -27,8 +27,8 @@
  * 注意：project 级 .pi/ 资源需要先信任项目。
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, type Theme } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -280,19 +280,8 @@ function pushMcpWidget(ui?: ExtensionContext["ui"], cwd = lastCwd): void {
   const u = ui ?? lastUi;
   if (!u) return;
   const servers = loadMcpServers(cwd);
-  const lines: string[] = [`[${EXT_NAME}] MCP 服务器（共 ${servers.length} 个）`];
-  if (servers.length === 0) {
-    lines.push("  未配置 MCP 服务器。输入 /mcp-ui 打开配置框添加");
-  } else {
-    for (const s of servers) {
-      const flag = s.disabled ? "已禁用" : "已启用";
-      lines.push(`  ${flag}  ${s.name}  [${s.kind}] ${s.target}`);
-      lines.push(`      来源：${s.source.replace(/\\/g, "/")}`);
-    }
-    lines.push("  输入 /mcp-ui 查看/编辑/启用/禁用");
-  }
+  // 不在输入框上方（aboveEditor）显示 MCP 面板，只保留状态栏摘要
   try {
-    u.setWidget(WIDGET_KEY, lines, { placement: "aboveEditor" });
     u.setStatus(STATUS_KEY_MCP, `MCP 服务器 ${servers.length} 个 · 启用 ${servers.filter((s) => !s.disabled).length}`);
   } catch {
     /* ignore */
@@ -471,6 +460,11 @@ class MCPPanel {
 
   private scopeLabel(): string {
     return this.scope === "global" ? "全局(~/.pi/agent/mcp.json)" : "项目(.pi/mcp.json)";
+  }
+
+  /** TUI 组件协议要求：终端尺寸变化 / 主题切换时由 pi-web 调用。无缓存状态，空实现即可。 */
+  invalidate(): void {
+    /* 无缓存状态需要失效 */
   }
 
   handleInput(data: string): void {
