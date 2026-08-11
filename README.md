@@ -6,7 +6,9 @@
 
 | 包 | 功能 | 配置 |
 |----|------|------|
-| **pi-web-vitals** | 聊天框底部信息栏显示缓存命中率(缓存读/(输入+缓存读))、MCP 服务器状态；/persona 全局人设注入 | `/persona set <人设>`、`/mcp-ui enable|disable <server>` |
+| **pi-web-vitals** | 聊天框底部信息栏显示缓存命中率(缓存读/(输入+缓存读))；MCP 管理面板(查看/添加/删除/启停/测试连接/JSON 编辑/作用域/pi-mcp-adapter 选项)；/persona 全局人设注入 | `/mcp-ui` 打开管理面板；`/persona set <人设>` |
+
+`/mcp-ui` 管理面板（内嵌同一窗口，不弹窗）：`[1]` 服务器列表/详情/启停/测试连接，`[2]` 引导式添加，`[3]` JSON 编辑(粘贴后回车)，`[4]` pi-mcp-adapter 选项，`[7]` 切换项目/全局作用域，`[0]` 刷新，`Esc` 关闭。
 | **searxng-search** | 通过自建 SearXNG 端点提供 `web_search` 工具（X-Search-Token 鉴权） | `/web-search config url <地址>`、`/web-search config token <token>`；或环境变量 `SEARXNG_URL` / `SEARXNG_TOKEN` |
 | **describe-image** | 按需识图：给非视觉模型(如 DeepSeek)加识图能力，主模型调 `describe_image` 工具 + 外部视觉模型(qwen-vl 等) | `/describe-image config baseUrl <地址>`、`/describe-image config model <模型>`、`/describe-image config apiKey <key>`；或环境变量 `VISION_BASE_URL` / `VISION_MODEL` / `VISION_API_KEY` |
 
