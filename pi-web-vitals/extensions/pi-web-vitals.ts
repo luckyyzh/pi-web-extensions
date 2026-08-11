@@ -199,6 +199,33 @@ function setServerDisabled(cwd: string, name: string, disabled: boolean): void {
   writeFileSync(p, JSON.stringify(data, null, 2) + "\n", "utf8");
 }
 
+/** 合并所有来源的有效 MCP 配置（高优先级在前，供编辑框显示现有 MCP） */
+function effectiveMcpConfig(cwd: string): { mcpServers: Record<string, Record<string, unknown>> } {
+  const map = new Map<string, Record<string, unknown>>();
+  for (const file of MCP_CONFIG_FILES(cwd)) {
+    if (!existsSync(file)) continue;
+    try {
+      const data = JSON.parse(readFileSync(file, "utf8")) as {
+        mcpServers?: Record<string, Record<string, unknown>>;
+      };
+      if (!data.mcpServers) continue;
+      for (const [name, def] of Object.entries(data.mcpServers)) {
+        if (!map.has(name)) map.set(name, def);
+      }
+    } catch {
+      /* 忽略解析失败的配置 */
+    }
+  }
+  return { mcpServers: Object.fromEntries(map) };
+}
+
+/** 把配置整体写入项目 .pi/mcp.json */
+function writeProjectMcpConfig(cwd: string, data: unknown): void {
+  const p = join(cwd, ".pi", "mcp.json");
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(data, null, 2) + "\n", "utf8");
+}
+
 /** 新增/覆盖一个 MCP server 定义（默认写入项目 .pi/mcp.json；global=true 写入 ~/.pi/agent/mcp.json） */
 function upsertServer(cwd: string, name: string, def: Record<string, unknown>, globalScope = false): void {
   const p = globalScope ? join(AGENT_DIR, "mcp.json") : join(cwd, ".pi", "mcp.json");
@@ -249,14 +276,14 @@ function pushMcpWidget(ui?: ExtensionContext["ui"], cwd = lastCwd): void {
   const servers = loadMcpServers(cwd);
   const lines: string[] = [`[${EXT_NAME}] MCP 服务器（共 ${servers.length} 个）`];
   if (servers.length === 0) {
-    lines.push("  未配置 MCP 服务器。输入 /mcp-ui 可引导添加");
+    lines.push("  未配置 MCP 服务器。输入 /mcp-ui 打开配置框添加");
   } else {
     for (const s of servers) {
       const flag = s.disabled ? "已禁用" : "已启用";
       lines.push(`  ${flag}  ${s.name}  [${s.kind}] ${s.target}`);
       lines.push(`      来源：${s.source.replace(/\\/g, "/")}`);
     }
-    lines.push("  输入 /mcp-ui 查看/添加/启用/禁用");
+    lines.push("  输入 /mcp-ui 查看/编辑/启用/禁用");
   }
   try {
     u.setWidget(WIDGET_KEY, lines, { placement: "aboveEditor" });
@@ -339,7 +366,7 @@ export default async function (pi: ExtensionAPI) {
       const list = () => {
         const servers = loadMcpServers(cwd);
         if (servers.length === 0) {
-          ctx.ui.notify("未配置 MCP 服务器。直接输入 /mcp-ui 可引导添加，或 /mcp-ui add <名称> <命令或URL>", "info");
+          ctx.ui.notify("未配置 MCP 服务器。输入 /mcp-ui 打开配置框添加。", "info");
           return;
         }
         const lines = servers
@@ -348,22 +375,27 @@ export default async function (pi: ExtensionAPI) {
         ctx.ui.notify(`MCP 服务器（${servers.length} 个）：\n${lines}\n\n/mcp-ui enable <名称> 或 /mcp-ui disable <名称>`, "info");
       };
 
-      // 无参数：有服务器则列列表；没有则引导添加（交互式配置面板）
+      // 无参数：打开一个编辑框，显示已有 MCP 并可增删改，保存写入 .pi/mcp.json
       if (!verb) {
-        if (loadMcpServers(cwd).length > 0) {
-          list();
-          return;
+        const prefill = JSON.stringify(effectiveMcpConfig(cwd), null, 2);
+        const edited = await ctx.ui.editor(
+          "MCP 配置（保存后写入 .pi/mcp.json）：在此查看/添加/修改/删除服务器",
+          prefill,
+        );
+        if (edited === undefined) return; // 用户取消
+        try {
+          const parsed = JSON.parse(edited) as { mcpServers?: unknown };
+          const servers = parsed?.mcpServers;
+          if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
+            ctx.ui.notify('配置格式无效：需要 {"mcpServers": { ... }} 结构', "warning");
+            return;
+          }
+          writeProjectMcpConfig(cwd, { mcpServers: servers });
+          pushMcpWidget(ctx.ui, cwd);
+          ctx.ui.notify("MCP 配置已保存（写入 .pi/mcp.json）。执行 /reload 生效。", "info");
+        } catch (error) {
+          ctx.ui.notify(`JSON 解析失败：${error instanceof Error ? error.message : String(error)}`, "warning");
         }
-        const name = await ctx.ui.input("MCP 服务器名称", "如 chrome-devtools");
-        if (!name) return;
-        const spec = await ctx.ui.input("命令 或 URL", "如 npx -y chrome-devtools-mcp 或 https://mcp.example.com/mcp");
-        if (!spec) return;
-        const def = /^https?:\/\//.test(spec)
-          ? { url: spec }
-          : { command: spec.split(/\s+/)[0], args: spec.split(/\s+/).slice(1) };
-        upsertServer(cwd, name, def);
-        pushMcpWidget(ctx.ui, cwd);
-        ctx.ui.notify(`已添加 MCP 服务器 "${name}"（写入 .pi/mcp.json）。执行 /reload 生效。`, "info");
         return;
       }
 
@@ -412,11 +444,11 @@ export default async function (pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(
-        "用法：\n  /mcp-ui                      查看列表；无服务器时进入引导添加\n" +
-          "  /mcp-ui add <名称> <命令或URL> [参数...]   添加（加 -g 写入全局）\n" +
+        "用法：\n  /mcp-ui                      打开编辑框（显示已有 MCP，可增删改）\n" +
+          "  /mcp-ui list                  查看列表\n" +
+          "  /mcp-ui add <名称> <命令或URL> [参数...]   快速添加（加 -g 写入全局）\n" +
           "  /mcp-ui remove <名称>         删除\n" +
-          "  /mcp-ui enable|disable <名称>  启用/禁用\n" +
-          "  /mcp-ui list                  查看列表",
+          "  /mcp-ui enable|disable <名称>  启用/禁用",
         "info",
       );
     },
