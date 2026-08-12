@@ -1,8 +1,0 @@
-{
-  "name": "pi-web-vitals",
-  "version": "0.1.0",
-  "description": "Pi Web 可视化：聊天框底部信息栏显示缓存命中率(缓存读/(输入+缓存读))、MCP 服务器状态；/persona 全局人设注入",
-  "keywords": ["pi-package"],
-  "license": "MIT",
-  "pi": { "extensions": ["./extensions"] }
-}
