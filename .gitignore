@@ -1,2 +1,15 @@
 node_modules/
 *.config.json
+*-config.json
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+backups/
+.pi/
+auth.json
+settings.json
+sessions/

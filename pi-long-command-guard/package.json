@@ -1,0 +1,8 @@
+{
+  "name": "pi-long-command-guard",
+  "version": "0.1.0",
+  "description": "Windows 后台任务工作流：Bash/PowerShell 长命令守卫、明确取消、真实结果恢复与按需加载的编排 skill。配合 pi-better-background-tasks 使用。",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": { "extensions": ["./extensions"], "skills": ["./skills"] }
+}
