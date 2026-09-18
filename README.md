@@ -6,7 +6,7 @@
 
 | 目录 | 功能 | 配置 / 依赖 |
 |---|---|---|
-| `searxng-search/` | `web_search` 网络搜索 | 自行配置 SearXNG 服务及 `SEARXNG_URL` / `SEARXNG_TOKEN`；支持 `/web-search config url|token <值>` |
+| `searxng-search/` | `web_search` 网络搜索（结果缓存 5 分钟 + 跨引擎 URL 去重，透出 answers/infobox/建议）+ `web_fetch` 静态页面正文抓取 | 自行配置 SearXNG 服务及 `SEARXNG_URL` / `SEARXNG_TOKEN`；支持 `/web-search config url|token <值>` |
 | `describe-image/` | `describe_image` 按需调用外部视觉模型 | 自行配置 `VISION_BASE_URL` / `VISION_MODEL` / `VISION_API_KEY`；支持 `/describe-image config baseUrl|model|apiKey <值>` |
 | `persona-injector/` | 每轮将用户人设追加到系统提示词 | 读取 `getAgentDir()` 下的 `persona.md`，不附带用户人设 |
 | `pi-long-command-guard/` | Windows 长命令守卫、Stop 取消本会话后台任务、恢复后台任务真实终态 | 配合 `pi-better-background-tasks` 和匹配基线的补丁；包含 `background-task-workflow` Skill |
