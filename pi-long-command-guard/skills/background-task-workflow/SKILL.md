@@ -46,15 +46,16 @@ description: 在 Windows Pi 中执行长命令、构建/安装/全量测试、�
   ```
   # agent-<id>: <任务名>
   status: running        # running / done / blocked
-  updated: <HH:MM>
   ## steps
-  - [x] 1. xxx (HH:MM)
+  - [x] 1. xxx
   - [ ] 2. yyy
   ## notes
   - 关键决策、坑、阻塞（blocked_on: agent-xxx 的产物 <路径>）
   ## deliverable   # done 时填写
   - <产物路径 / 验证输出摘要>
   ```
+
+  板文件里**不写时间戳**：时间以文件 mtime 为准（OS 生成，模型自报的日期/时间不可靠）。判断某代理是否卡住 = 其文件 LastWriteTime 长时间未变且 status 非 done。
 
 - 纪律：每完成一步或遇阻塞即更新自己的文件（一两行即可）；**只写自己的文件**，他人文件与 README 只读；依赖他人产物时先读对方文件，`status: done` 才开工，等待期间先做独立步骤并标注 blocked_on。
 - 任务全部验收后删除整个 board 目录。
