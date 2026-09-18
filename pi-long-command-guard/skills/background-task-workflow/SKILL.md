@@ -35,6 +35,31 @@ description: 在 Windows Pi 中执行长命令、构建/安装/全量测试、�
 - callback:false 的任务不会通知；除非明确交接给用户管理，不要为需要后续验收的任务禁用 callback。
 - 取消不会触发完成通知。Windows 的未发送完成项在原会话恢复后补发，不应唤醒其他会话；不要把“没有通知”解释为成功。
 
+## 共享进度板（多代理/多长任务并行时建议）
+
+当同时有 ≥2 个代理或 ≥2 个较长任务并行、且彼此有依赖或需要互见进展时，建议建进度板；纯串行或秒级任务不必建。是否建板由模型自行判断。
+
+- 目录：`~/.pi/agent/scratch/boards/<board-id>/`。board-id 用短任务名或 4 位随机 hex，父会话生成；给子代理的 prompt 里写绝对路径和该代理的文件名。
+- 父会话先写 `README.md`：总目标、任务拆分表（id/任务/文件范围/owner/依赖）、共享接口与关键事实（README 仅父会话可写）。
+- 每个代理（含父会话自己）维护自己的 `<board>/agent-<id>.md`：
+
+  ```
+  # agent-<id>: <任务名>
+  status: running        # running / done / blocked
+  updated: <HH:MM>
+  ## steps
+  - [x] 1. xxx (HH:MM)
+  - [ ] 2. yyy
+  ## notes
+  - 关键决策、坑、阻塞（blocked_on: agent-xxx 的产物 <路径>）
+  ## deliverable   # done 时填写
+  - <产物路径 / 验证输出摘要>
+  ```
+
+- 纪律：每完成一步或遇阻塞即更新自己的文件（一两行即可）；**只写自己的文件**，他人文件与 README 只读；依赖他人产物时先读对方文件，`status: done` 才开工，等待期间先做独立步骤并标注 blocked_on。
+- 任务全部验收后删除整个 board 目录。
+- 进度板是状态共享，不是消息通道；向运行中的子代理传指令用 `steer_subagent`。
+
 ## 停止与失败
 
 - `bg_task_stop` 只针对明确的任务 id。检查返回状态：仍为 running 或包含停止错误就没有确认停成功。
