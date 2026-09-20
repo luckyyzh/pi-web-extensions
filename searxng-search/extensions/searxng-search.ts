@@ -245,9 +245,14 @@ function parseResponse(json: unknown, maxResults: number): SearxngResponse {
     if (title || content) infobox = { title, content };
   }
 
-  // unresponsive_engines：元素可能是字符串或 {engine, error}
+  // unresponsive_engines：元素可能是字符串、[name, error] 数组（SearXNG 实际返回形状）或 {engine, error}
   const unresponsive = (Array.isArray(root.unresponsive_engines) ? root.unresponsive_engines : []).map((e) => {
     if (typeof e === "string") return e;
+    if (Array.isArray(e)) {
+      const name = typeof e[0] === "string" ? e[0] : "unknown";
+      const err = typeof e[1] === "string" ? e[1] : "error";
+      return `${name}(${err})`;
+    }
     if (e && typeof e === "object") {
       const o = e as Record<string, unknown>;
       const name = typeof o.engine === "string" ? o.engine : "unknown";
@@ -567,15 +572,15 @@ export default function (pi: ExtensionAPI) {
     label: "Web Search",
     description:
       "通过私有 SearXNG 实例搜索互联网，返回标题/链接/摘要/发布日期/引擎。" +
-      "engines 逗号分隔可选：google(全面,~1-2s)、bing(快,中文可用)、yandex、360search(中文)、github(代码仓库)、stackoverflow(问答)、mdn(Web文档)。" +
-      "不填用服务器默认组(google cse+bing+yandex+360search,~1s)。追求单引擎速度时指定 engines。",
+      "engines 逗号分隔可选：google(全面)、bing(快)、yandex(中文召回好)、360search(中文)、quark(中文)、bilibili(B站视频,快)、github(代码仓库)、stackoverflow(问答)、mdn(Web文档,英文查询最有效)。" +
+      "不填用服务器默认组(google+bing+yandex+360search,~1-2s)，默认组引擎挂了会自动降级到其余引擎。追求单引擎速度时指定 engines。",
     promptSnippet: "Search the internet via a private SearXNG instance; returns title/link/snippet/engine",
     parameters: Type.Object({
       query: Type.String({ description: "搜索关键词" }),
       engines: Type.Optional(Type.String({
         description:
-          "逗号分隔的引擎，可选：google(全面,~1-2s)、bing(快,中文可用)、yandex、360search(中文)、github(代码仓库)、stackoverflow(问答)、mdn(Web文档)。" +
-          "不填用服务器默认组(google cse+bing+yandex+360search,~1s)",
+          "逗号分隔的引擎，可选：google(全面)、bing(快)、yandex(中文召回好)、360search(中文)、quark(中文)、bilibili(B站视频,快)、github(代码仓库)、stackoverflow(问答)、mdn(Web文档,英文查询最有效)。" +
+          "不填用服务器默认组(google+bing+yandex+360search,~1-2s)",
       })),
       language: Type.Optional(Type.String({ description: "语言，如 zh-CN、en" })),
       timeRange: Type.Optional(Type.Union([

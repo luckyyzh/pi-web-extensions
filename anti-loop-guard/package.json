@@ -1,0 +1,8 @@
+{
+  "name": "anti-loop-guard",
+  "version": "0.1.0",
+  "description": "重复工具调用拦截（紧邻重复，或上次结果无效后的同参数重试）+ 短结果显式化：白名单工具（web_fetch）过短结果改写为 isError 并提示不要用相同参数重试。",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": { "extensions": ["./extensions"] }
+}
