@@ -10,6 +10,7 @@
     { "name": "pi-better-plan", "version": "0.1.5" },
     { "name": "pi-long-command-guard", "path": "pi-long-command-guard" },
     { "name": "pi-agent-browser-native", "version": "0.6.13" },
-    { "name": "anti-loop-guard", "path": "anti-loop-guard" }
+    { "name": "anti-loop-guard", "path": "anti-loop-guard" },
+    { "name": "ssh", "path": "ssh" }
   ]
 }

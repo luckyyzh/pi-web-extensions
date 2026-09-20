@@ -11,9 +11,18 @@
 | `persona-injector/` | 每轮将用户人设追加到系统提示词 | 读取 `getAgentDir()` 下的 `persona.md`，不附带用户人设 |
 | `pi-long-command-guard/` | Windows 长命令守卫、Stop 取消本会话后台任务、恢复后台任务真实终态 | 配合 `pi-better-background-tasks` 和匹配基线的补丁；包含 `background-task-workflow` Skill |
 | `anti-loop-guard/` | 重复工具调用拦截（紧邻同参重复、上次结果无效后的同参重试；第 2 次 block、第 3 次 block + terminate）+ 短结果显式化（白名单工具 web_fetch 命中「无效页面」特征时改写为 isError） | 无需配置，参数内置；无第三方依赖 |
-| `ssh/` | 历史 SSH 扩展 | **仅保留历史，默认不安装**；不作为当前 SSH 集成入口 |
+| `ssh/` | SSH 远程执行（fork 远程 SSH 工作区依赖） | 清单默认安装；与 pi-web 内嵌 `vendor/ssh` 同源，两者装其一即可 |
 
 每个自定义包都有 `package.json` 与 `extensions/`；guard 另含 `skills/background-task-workflow/SKILL.md`。Skill 随包保留，按需加载。
+
+## 独立 Skills
+
+`skills/` 收录不依附于包的全局 Skill，同步时自动复制到 `agentDir/skills/`（仓库版本覆盖同名目录，不删除本地其它 Skill）：
+
+| 目录 | 功能 |
+|---|---|
+| `skills/fast-browser/` | agent_browser 高性能执行规范：批处理（job/batch/script）减少模型往返，范围快照省 token |
+| `skills/officecli/` | 用 officecli CLI 创建 / 分析 / 校对 / 修改 Office 文档（.docx / .xlsx / .pptx） |
 
 ## 安装与更新约定
 
@@ -23,6 +32,7 @@
 - `start-pi-web.cmd update [实例名]`：用户手动更新（同时更新 pi-web fork 与本仓库）；不构建、不启动。
 - 首次保留已有安装；清单中 npm 包版本变化时按钉住版本重装。已有其它路径的本地扩展不覆盖或重复注册。
 - 本地包按相对 `agentDir` 的路径注册，不依赖项目 settings。不要把当前工作目录下的相对路径误当成 agentDir 相对路径。
+- 仓库 `skills/` 下的独立 Skill 在每次同步时复制到 `agentDir/skills/`（同名覆盖，其它 Skill 不受影响）。
 
 `install-manifest.json` 是安装清单，第三方 npm 包固定版本；`patches/` 保存后台任务插件官方基线与修复文件的校验信息。普通启动有完成标记且仓库无新提交时不做包操作；有新提交时拉取后删除标记并按清单重新同步（含补丁与版本变化重装）。显式 `update` 还会重装清单中全部 npm 包。首次运行需 Git、npm 和网络；先发布本仓库的新清单，再使用配套启动器。
 
@@ -39,6 +49,7 @@
 - `searxng-search`、`describe-image`、`persona-injector` 来自主项目的对应 `vendor/` 安全源码。
 - guard 仅收录其 `package.json`、三个扩展源码和一个 Skill；不收录 backups、旧 patches、NOTES-patches 或带本机用户路径的 tests。
 - `anti-loop-guard` 为自研包，收录 `package.json`、扩展源码与测试；只依赖 `@earendil-works/pi-coding-agent` 的类型和 node 内置能力。
+- 独立 Skills 为自研 SKILL.md 文档，已审查，不含本机路径或密钥。
 - 源码接口保持不变。审阅未发现内置凭据或个人绝对路径，因此未改写业务源码。
 - 不复制配置、密钥、登录态、历史、备份、任务日志或用户数据。忽略规则仅是防误提交辅助，不替代提交前审查。
 - 代码已做来源、敏感模式、JSON/TypeScript 语法检查。安装流程的验证不代表外部搜索、识图服务或 Windows/SSH/浏览器功能均已验收。
