@@ -12,6 +12,7 @@
 | `pi-long-command-guard/` | Windows 长命令守卫、Stop 取消本会话后台任务、恢复后台任务真实终态 | 配合 `pi-better-background-tasks` 和匹配基线的补丁；包含 `background-task-workflow` Skill |
 | `anti-loop-guard/` | 重复工具调用拦截（紧邻同参重复、上次结果无效后的同参重试；第 2 次 block、第 3 次 block + terminate）+ 短结果显式化（白名单工具 web_fetch 命中「无效页面」特征时改写为 isError） | 无需配置，参数内置；无第三方依赖 |
 | `ssh/` | SSH 远程执行（fork 远程 SSH 工作区依赖） | 清单默认安装；与 pi-web 内嵌 `vendor/ssh` 同源，两者装其一即可 |
+| `project-memory/` | 项目知识、工作交接、压缩原文检查点与审批式项目 skill 发布 | 全局加载、按项目隔离；配置 `getAgentDir()/project-memory.json`，数据保存在项目 `.pi/project-memory/`；不含用户记忆 |
 
 每个自定义包都有 `package.json` 与 `extensions/`；guard 另含 `skills/background-task-workflow/SKILL.md`。Skill 随包保留，按需加载。
 
@@ -43,6 +44,15 @@
 - 浏览器插件还需要上游 **agent-browser CLI >= 0.35（推荐 0.37）** 及可用的浏览器环境；录屏需要 **ffmpeg**。这些外部依赖须另行准备，本次没有自动安装或验证它们。
 - 搜索和识图服务需要用户自行配置、授权，可能向所配置的外部服务发送查询或图片。SearXNG 的原有默认服务地址及识图的 DashScope 默认端点保持不变，不代表服务可用或附带访问权限；建议显式配置自己的端点。
 - 为保留接口，搜索配置仍位于用户主目录的 `.pi/agent/searxng-config.json`，识图配置仍位于 `.pi/agent/extensions/describe-image-config.json`，不随自定义 agentDir 自动迁移。搜索文件配置优先于环境变量；识图的 API Key 优先使用环境变量，端点和模型优先使用文件配置。
+
+## 项目记忆扩展
+
+`project-memory/` 与配套 fork 的 `packages/project-memory/` 同步交付。只同步源码、测试和文档，不同步 `.pi/` 下的项目记忆、检查点或已批准技能。此版本为 0.2.0，说明见 [project-memory/README.md](project-memory/README.md)。
+
+- 压缩前验证原始会话并保存最近 8 个恢复检查点；失败取消压缩，不改现有缓存对齐摘要请求。
+- 知识、交接、归档及 skill 均有容量限制；skill 新增/更新/退休须用户确认。
+- 原文回查依赖 Pi 会话文件仍存在，不是完整会话备份；不提供定时 dream。
+- 如果已有指向 fork 工作目录的本地安装，按现有路径去重规则保留，避免重复注册；本次同步不会自动迁移用户配置。
 
 ## 来源与审查范围
 

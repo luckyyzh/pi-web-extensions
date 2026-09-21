@@ -11,6 +11,7 @@
     { "name": "pi-long-command-guard", "path": "pi-long-command-guard" },
     { "name": "pi-agent-browser-native", "version": "0.6.13" },
     { "name": "anti-loop-guard", "path": "anti-loop-guard" },
-    { "name": "ssh", "path": "ssh" }
+    { "name": "ssh", "path": "ssh" },
+    { "name": "project-memory", "path": "project-memory" }
   ]
 }
