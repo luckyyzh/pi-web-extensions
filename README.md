@@ -47,10 +47,11 @@
 
 ## 项目记忆扩展
 
-`project-memory/` 与配套 fork 的 `packages/project-memory/` 同步交付。只同步源码、测试和文档，不同步 `.pi/` 下的项目记忆、检查点或已批准技能。此版本为 0.2.0，说明见 [project-memory/README.md](project-memory/README.md)。
+`project-memory/` 与配套 fork 的 `packages/project-memory/` 同步交付。只同步源码、测试和文档，不同步 `.pi/` 下的项目记忆、检查点或已批准技能。此版本为 0.2.1，说明见 [project-memory/README.md](project-memory/README.md)。
 
 - 压缩前验证原始会话并保存最近 8 个恢复检查点；失败取消压缩，不改现有缓存对齐摘要请求。
 - 知识、交接、归档及 skill 均有容量限制；skill 新增/更新/退休须用户确认。
+- `/memory list` 按分类/标题打开浏览弹窗；`/memory approve` 打开待审批选择列表，选择后仍需全文确认。
 - 原文回查依赖 Pi 会话文件仍存在，不是完整会话备份；不提供定时 dream。
 - 如果已有指向 fork 工作目录的本地安装，按现有路径去重规则保留，避免重复注册；本次同步不会自动迁移用户配置。
 
