@@ -2,7 +2,7 @@ import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readLog } from "./logs.js";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
-import { cancelCallbackBatch } from "./shared-callback-batcher.js";
+import { cancelCallbackBatch, getCallbackBatcher } from "./shared-callback-batcher.js";
 import { listActiveMetasForOrigin, listMetas, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
@@ -113,22 +113,72 @@ const BACKGROUND_ORCHESTRATION_GUIDELINES = [
 export function registerTools(pi: ExtensionAPI): void {
   let activeSession: BackgroundTaskCallbackOrigin | undefined;
   const getActiveSession = () => activeSession;
+  let callbackContext: ExtensionContext | undefined;
+  let atTurnBoundary = false;
+  let notificationsPaused = false;
+  // Keep completions in the plugin outbox while a model/tool turn is active.
+  // A status read in that turn can then suppress them before they enter Pi's queue.
+  const batcher = getCallbackBatcher(pi, {
+    canFlush: () => !!activeSession && !notificationsPaused
+      && (atTurnBoundary || callbackContext?.isIdle() === true),
+    deliverAs: "steer",
+  });
+  const inspections = new Map<string, { meta: BackgroundTaskMeta; body: string }>();
+  const recordInspection = (toolCallId: string): InspectionRecorder => (meta, body) => {
+    if (isTerminalStatus(meta.status)) inspections.set(toolCallId, { meta: { ...meta }, body });
+  };
+  pi.on("agent_start", (_event, ctx) => {
+    callbackContext = ctx;
+    notificationsPaused = false;
+  });
+  pi.on("turn_end", async (event, ctx) => {
+    callbackContext = ctx;
+    if (ctx.signal?.aborted || (event.message.role === "assistant"
+      && (event.message.stopReason === "aborted" || event.message.stopReason === "error"))) {
+      inspections.clear();
+      notificationsPaused = true;
+      return;
+    }
+    // Tool results have now been finalized and persisted. UI/list lookups and
+    // aborted, failed or replaced results must not consume a notification.
+    for (const message of event.toolResults) {
+      const inspected = inspections.get(message.toolCallId);
+      if (!inspected || message.isError
+        || !message.content.some((part) => part.type === "text" && part.text.includes(inspected.body))) continue;
+      try {
+        acknowledgeInspection(inspected.meta, getCallbackOrigin(ctx));
+      } catch {
+        // Failed acknowledgments remain eligible for notification.
+        if (ctx.hasUI) ctx.ui.notify("Could not acknowledge background task inspection; its completion may notify again.", "warning");
+      }
+    }
+    inspections.clear();
+    atTurnBoundary = true;
+    try { await batcher.flush(); } finally { atTurnBoundary = false; }
+  });
+  pi.on("agent_settled", async (_event, ctx) => {
+    callbackContext = ctx;
+    if (ctx.signal?.aborted) notificationsPaused = true;
+    await batcher.flush();
+  });
 
   pi.on("session_start", async (_event, ctx) => {
     activeSession = getCallbackOrigin(ctx);
+    callbackContext = ctx;
+    notificationsPaused = false;
     const restore = process.platform === "win32"
       ? listMetasForOrigin(activeSession).filter((meta) => meta.status === "running"
-        || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt))
+        || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt && !meta.dismissedAt))
       : listActiveMetasForOrigin(activeSession);
     for (const meta of restore) resumeRunningTask(pi, meta, getActiveSession);
     runTaskMaintenance({ activeOrigin: activeSession });
   });
-  pi.on("session_before_switch", () => {
-    activeSession = undefined;
-    cancelCallbackBatch(pi);
-  });
+  // A before-switch event can be vetoed by another extension. Only tear down
+  // after Pi confirms replacement/shutdown, otherwise callbacks become stranded.
   pi.on("session_shutdown", () => {
     activeSession = undefined;
+    callbackContext = undefined;
+    inspections.clear();
     cancelCallbackBatch(pi);
   });
 
@@ -175,9 +225,9 @@ export function registerTools(pi: ExtensionAPI): void {
     label: "BG Status",
     description: "Inspect one background task. Default output is a compact model-facing summary; pass verbose:true only when full raw metadata is explicitly needed. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
     parameters: IdParams,
-    async execute(_toolCallId, params) {
+    async execute(toolCallId, params) {
       const meta = readMeta(params.id);
-      return text(formatStatus(meta, params.id, { verbose: params.verbose === true }));
+      return text(formatStatus(meta, params.id, { verbose: params.verbose === true, onInspection: recordInspection(toolCallId) }));
     },
   });
 
@@ -189,8 +239,8 @@ export function registerTools(pi: ExtensionAPI): void {
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
     },
-    async execute(_toolCallId, params) {
-      return logText(params.id, params.tail_lines);
+    async execute(toolCallId, params) {
+      return logText(params.id, params.tail_lines, recordInspection(toolCallId));
     },
   });
 
@@ -218,7 +268,7 @@ export function registerTools(pi: ExtensionAPI): void {
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return actionText(pi, params, ctx, activeSession, getActiveSession);
+      return actionText(pi, params, ctx, activeSession, getActiveSession, recordInspection(_toolCallId));
     },
   });
 
@@ -232,7 +282,7 @@ export function registerTools(pi: ExtensionAPI): void {
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return actionText(pi, params, ctx, activeSession, getActiveSession);
+      return actionText(pi, params, ctx, activeSession, getActiveSession, recordInspection(_toolCallId));
     },
   });
 }
@@ -247,11 +297,12 @@ async function actionText(
   ctx: ExtensionContext,
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
+  onInspection?: InspectionRecorder,
 ) {
   if (params.action === "log" && params.id) {
-    return logText(String(params.id), params.tail_lines as number | undefined);
+    return logText(String(params.id), params.tail_lines as number | undefined, onInspection);
   }
-  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession));
+  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession, onInspection));
 }
 
 async function runAction(
@@ -260,6 +311,7 @@ async function runAction(
   ctx: ExtensionContext,
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
+  onInspection?: InspectionRecorder,
 ): Promise<string> {
   switch (params.action) {
     case "spawn":
@@ -271,10 +323,10 @@ async function runAction(
       return formatList(resolveList(params.status as string[] | undefined, params.limit as number | undefined));
     case "status":
       if (!params.id) return "Invalid parameters: status requires id.";
-      return formatStatus(readMeta(String(params.id)) ?? undefined, String(params.id), { verbose: params.verbose === true });
+      return formatStatus(readMeta(String(params.id)) ?? undefined, String(params.id), { verbose: params.verbose === true, onInspection });
     case "log":
       if (!params.id) return "Invalid parameters: log requires id.";
-      return formatLog(String(params.id), params.tail_lines as number | undefined);
+      return formatLog(String(params.id), params.tail_lines as number | undefined, onInspection);
     case "stop":
       if (!params.id) return "Invalid parameters: stop requires id.";
       return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession));
@@ -347,10 +399,26 @@ function formatList(metas: BackgroundTaskMeta[]): string {
   }).join("\n");
 }
 
-function formatStatus(meta: BackgroundTaskMeta | undefined, id?: string, options: { verbose?: boolean } = {}): string {
+type InspectionRecorder = (meta: BackgroundTaskMeta, body: string) => void;
+
+function acknowledgeInspection(inspected: BackgroundTaskMeta, origin: BackgroundTaskCallbackOrigin): void {
+  const owner = inspected.callbackOrigin;
+  // Legacy tasks without a verifiable owning session remain notify-able.
+  if (!owner?.sessionId || owner.sessionId !== origin.sessionId || owner.cwd !== origin.cwd) return;
+  const current = readMeta(inspected.id);
+  if (!current || !isTerminalStatus(current.status) || current.status !== inspected.status
+    || current.endedAt !== inspected.endedAt || current.callbackOrigin?.sessionId !== owner.sessionId
+    || current.callbackOrigin?.cwd !== owner.cwd || current.callbackSentAt || current.callbackSuppressedAt) return;
+  current.callbackSuppressedAt = Date.now();
+  current.callbackSuppressedReason = "terminal result inspected by owning session";
+  writeMeta(current);
+}
+
+function formatStatus(meta: BackgroundTaskMeta | undefined, id?: string, options: { verbose?: boolean; onInspection?: InspectionRecorder } = {}): string {
   if (!meta) return `No background task found${id ? ` for id ${id}` : ""}.`;
-  if (!options.verbose) return formatCompactStatus(meta);
-  return JSON.stringify(meta, null, 2);
+  const body = options.verbose ? JSON.stringify(meta, null, 2) : formatCompactStatus(meta);
+  options.onInspection?.(meta, body);
+  return body;
 }
 
 function formatCompactStatus(meta: BackgroundTaskMeta): string {
@@ -392,16 +460,22 @@ function oneLine(value: unknown, maxLength: number): string {
   return single.length <= maxLength ? single : `${single.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
-function formatLog(id: string, tailLines?: number): string {
+function formatLog(id: string, tailLines?: number, onInspection?: InspectionRecorder): string {
   const meta = readMeta(id);
   if (!meta) return `No background task found for id ${id}.`;
   const log = readLog(meta.logPath, tailLines ?? 5);
   const prefix = log.truncated ? `[showing tail of ${meta.logPath}]\n` : `[${meta.logPath}]\n`;
-  return prefix + (log.text || "(log is empty)");
+  // readLog treats unreadable/missing logs as empty. Do not acknowledge those.
+  // Include the terminal status so a failure cannot be mistaken for an old log tail.
+  const terminal = isTerminalStatus(meta.status) && !!log.text;
+  const statusLine = terminal ? `task ${meta.id}: ${meta.status}; exit=${meta.lastExitCode ?? "unknown"}\n` : "";
+  const body = prefix + statusLine + (log.text || "(log is empty)");
+  if (terminal) onInspection?.(meta, body);
+  return body;
 }
 
-function logText(id: string, tailLines?: number) {
-  const body = formatLog(id, tailLines);
+function logText(id: string, tailLines?: number, onInspection?: InspectionRecorder) {
+  const body = formatLog(id, tailLines, onInspection);
   if (!readMeta(id)) return text(body);
   return text(body, buildBackgroundTaskLogDisplayDetails(body));
 }

@@ -889,12 +889,12 @@ async function notifyTerminal(
 ): Promise<void> {
   const owner = process.platform === "win32" ? windowsTaskOwners.get(meta.id) : undefined;
   if (owner) { pi = owner.pi; getActiveSession = owner.getActiveSession; }
-  if (meta.callback === false || meta.callbackSentAt || meta.callbackSuppressedAt) {
+  if (meta.callback === false || meta.callbackSentAt || meta.callbackSuppressedAt || meta.dismissedAt) {
     windowsTaskOwners.delete(meta.id);
     return;
   }
   const latest = readMeta(meta.id) ?? meta;
-  if (latest.callback === false || latest.callbackSentAt || latest.callbackSuppressedAt) return;
+  if (latest.callback === false || latest.callbackSentAt || latest.callbackSuppressedAt || latest.dismissedAt) return;
   // Cancellation is an explicit action by the agent or user, so a completion
   // wakeup would be noise. Record the suppression durably so the session_start
   // replay path never fires a callback for a cancelled task either.
@@ -920,7 +920,8 @@ async function notifyTerminal(
     callback: true,
     isDelivered: () => {
       const current = readMeta(latest.id);
-      return current?.callbackSentAt !== undefined || current?.callbackSuppressedAt !== undefined;
+      return current?.callbackSentAt !== undefined || current?.callbackSuppressedAt !== undefined
+        || current?.dismissedAt !== undefined;
     },
     getSuppressionReason: () => {
       const current = readMeta(latest.id);

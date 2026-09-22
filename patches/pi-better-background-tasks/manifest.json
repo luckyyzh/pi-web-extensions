@@ -11,12 +11,19 @@
     {
       "path": "src/runtime.ts",
       "before": "bf743e3394de73083547a85a10840e8d54d27ba91500323a10cd360260676ec0",
-      "after": "4667f3a255970e90c20af8cf3594544a133ab588dcc4254bae6450c4e1fee27c"
+      "after": "abbef696e074a975fc9cf64b7625082b14e9aa4a524150c70254c33a85c52c92",
+      "previous": ["4667f3a255970e90c20af8cf3594544a133ab588dcc4254bae6450c4e1fee27c"]
     },
     {
       "path": "src/tools.ts",
       "before": "5bf9b6e1aede855344ad28e5f076057fda7bd540f741a3680edb111471e64583",
-      "after": "a51b4d5d0afcd3f5242fa64b741fc9eb79f7fedb37663d2c4361df3931f42b06"
+      "after": "a4441fdf86ee3f219fdadee74b8aa9346c6ae8f99c108665bdc816924e219605",
+      "previous": ["a51b4d5d0afcd3f5242fa64b741fc9eb79f7fedb37663d2c4361df3931f42b06"]
+    },
+    {
+      "path": "src/shared-callback-batcher.ts",
+      "before": "04180af8a73d8fde70277bbbf3904aff81be01d993fcce7028ab902f25c915b6",
+      "after": "62c80cc70799f5092b5d6a29fc27cbc7a9f0b9a38a54eb0a8d60da352a502633"
     }
   ]
 }
